@@ -7,6 +7,7 @@
 #ifndef __WX64_COMMON_H__
 #define __WX64_COMMON_H__
 #include <windows.h>
+#include "statuscodes.h"
 
 #pragma warning( disable : 4047 4055 4127 4200 4201 4204)
 
@@ -63,20 +64,26 @@ typedef struct tdKMDDATA {
 	QWORD _op;						// [0xFF8] (op is last 8 bytes in 4k-page)
 } KMDDATA, *PKMDDATA;
 
-// KMDDATA_OUTSTATUS_VOID - Normal status - take no special action.
-#define KMDDATA_OUTSTATUS_VOID		0
-// KMDDATA_OUTSTATUS_KBD_IO - Keyboard interactive IO.
-// dataOut[8] = input buffer physical address
-// dataOut[9] = output buffer physical address
-#define KMDDATA_OUTSTATUS_KBD_IO	1
-
-// used together with KMDDATA_OUTSTATUS_KBD_IO out status
-typedef struct tdKMDBUFFERIO {
-	DWORD qwSeqNo;
-	DWORD qwSeqNoAck;
-	DWORD cb;
-	BYTE  pb[];
-} KMD_BUFFER_IO, *PKMD_BUFFER_IO;
+#define EXEC_IO_MAGIC					0x12651232dfef9521
+#define EXEC_IO_CONSOLE_BUFFER_SIZE		0x800
+#define EXEC_IO_DMAOFFSET_IS			0x80000
+#define EXEC_IO_DMAOFFSET_OS			0x81000
+typedef struct tdEXEC_IO {
+	QWORD magic;
+	struct {
+		QWORD cbRead;
+		QWORD cbReadAck;
+		QWORD Reserved[10];
+		BYTE  pb[800];
+	} con;
+	struct {
+		QWORD seq;
+		QWORD seqAck;
+		QWORD fCompleted;
+		QWORD fCompletedAck;
+	} bin;
+	QWORD Reserved[395];
+} EXEC_IO, *PEXEC_IO;
 
 // system information class 11
 typedef struct _SYSTEM_MODULE_INFORMATION_ENTRY {
@@ -236,26 +243,39 @@ typedef struct tdKERNEL_FUNCTIONS {
 		_In_ HANDLE hObject
 		);
 	NTSTATUS(*ZwCreateFile)(
-		_Out_ PHANDLE FileHandle, 
-		_In_ ACCESS_MASK DesiredAccess, 
-		_In_ PVOID ObjectAttributes, 
-		_Out_ PIO_STATUS_BLOCK IoStatusBlock, 
-		_In_opt_ PLARGE_INTEGER AllocationSize, 
-		_In_ ULONG FileAttributes, 
-		_In_ ULONG ShareAccess, 
-		_In_ ULONG CreateDisposition,
-		_In_ ULONG CreateOptions, 
+		_Out_	 PHANDLE			FileHandle, 
+		_In_	 ACCESS_MASK		DesiredAccess, 
+		_In_	 PVOID				ObjectAttributes, 
+		_Out_	 PIO_STATUS_BLOCK	IoStatusBlock, 
+		_In_opt_ PLARGE_INTEGER		AllocationSize, 
+		_In_	 ULONG				FileAttributes, 
+		_In_	 ULONG				ShareAccess, 
+		_In_	 ULONG				CreateDisposition,
+		_In_	 ULONG				CreateOptions, 
 		_In_reads_bytes_opt_(EaLength) PVOID EaBuffer, 
-		_In_ ULONG EaLength
+		_In_	 ULONG				EaLength
 		);
 	NTSTATUS(*ZwOpenFile)(
-		_Out_ PHANDLE            FileHandle,
-		_In_  ACCESS_MASK        DesiredAccess,
-		_In_  POBJECT_ATTRIBUTES ObjectAttributes,
-		_Out_ PIO_STATUS_BLOCK   IoStatusBlock,
-		_In_  ULONG              ShareAccess,
-		_In_  ULONG              OpenOptions
+		_Out_	 PHANDLE            FileHandle,
+		_In_	 ACCESS_MASK        DesiredAccess,
+		_In_	 POBJECT_ATTRIBUTES ObjectAttributes,
+		_Out_	 PIO_STATUS_BLOCK   IoStatusBlock,
+		_In_	 ULONG              ShareAccess,
+		_In_	 ULONG              OpenOptions
 		);
+	NTSTATUS(*ZwQueryDirectoryFile)(
+		_In_	 HANDLE				FileHandle,
+		_In_opt_ HANDLE				Event,
+		_In_opt_ PVOID				ApcRoutine,
+		_In_opt_ PVOID				ApcContext,
+		_Out_	 PIO_STATUS_BLOCK	IoStatusBlock,
+		_Out_	 PVOID				FileInformation,
+		_In_	 ULONG				Length,
+		_In_	 QWORD				FileInformationClass,
+		_In_	 BOOLEAN			ReturnSingleEntry,
+		_In_opt_ PUNICODE_STRING	FileName,
+		_In_	 BOOLEAN			RestartScan
+	);
 	NTSTATUS(*ZwQuerySystemInformation)(
 		_In_ SYSTEM_INFORMATION_CLASS SystemInformationClass,
 		_Inout_ PVOID SystemInformation,
@@ -269,7 +289,7 @@ typedef struct tdKERNEL_FUNCTIONS {
 		_Out_    PIO_STATUS_BLOCK IoStatusBlock,
 		_Out_    PVOID            Buffer,
 		_In_     ULONG            Length,
-		_In_opt_ PLARGE_INTEGER   ByteOffset,
+		_In_opt_ PQWORD           ByteOffset,
 		_In_opt_ PULONG           Key
 		);
 	NTSTATUS(*ZwSetSystemInformation)(
@@ -334,10 +354,13 @@ typedef struct tdKERNEL_FUNCTIONS {
 #define H_ZwClose								0x5d044c61
 #define H_ZwCreateFile							0xc3a08f9d
 #define H_ZwCreateKey							0x11c719c1
+#define H_ZwDeleteFile							0xb6b0987d
 #define H_ZwLoadDriver							0x0675aa53
 #define H_ZwOpenFile							0x8829d4b8
 #define H_ZwOpenProcess							0xf0d09d60
 #define H_ZwReadFile							0x87fd3516
+#define H_ZwQueryDirectoryFile					0x6fb06450
+#define H_ZwQueryInformationFile				0xd7cd4118
 #define H_ZwQuerySystemInformation				0xe661cae2
 #define H_ZwSetSystemInformation				0xf7e624de
 #define H_ZwSetValueKey							0x03a49be5
@@ -353,5 +376,25 @@ VOID InitializeKernelFunctions(_In_ QWORD qwNtosBase, _Out_ PKERNEL_FUNCTIONS fn
 DWORD PEGetImageSize(_In_ QWORD hModule);
 VOID CommonSleep(_In_ PKERNEL_FUNCTIONS fnk, _In_ DWORD ms);
 extern QWORD GetCR3();
+extern VOID CacheFlush();
+
+/*
+* If a large output is to be written to PCILeech which won't fit in the DMA
+* buffer - write as much as possible in the DMA buffer and then call this fn.
+* When returned successfully write another chunk to this buffer and call again.
+* WriteLargeOutput_Finish must be called after all data is written to clean up.
+* -- fnk
+* -- pk
+* -- return
+*/
+BOOL WriteLargeOutput_WaitNext(_In_ PKERNEL_FUNCTIONS fnk, PKMDDATA pk);
+
+/*
+* Clean up function that must be called if WriteLargeOutput_WaitNext has
+* previously been called.
+* -- fnk
+* -- pk
+*/
+VOID WriteLargeOutput_Finish(_In_ PKERNEL_FUNCTIONS fnk, PKMDDATA pk);
 
 #endif /* __WX64_COMMON_H__ */

